@@ -13,5 +13,3 @@ __pycache__/
 *.pid
 .env
 .DS_Store
-
-.orca-scratch/
