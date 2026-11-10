@@ -130,21 +130,41 @@ function redact(s) { // never let the webhook URL or header values reach the log
   for (const v of secrets.sort((a, b) => String(b).length - String(a).length)) s = s.split(String(v)).join("[redacted]");
   return s.replace(/\s+/g, " ").trim().slice(0, 500);
 }
-async function post(e) { // one attempt; returns { ok, status, body, retry }
+// The shell stream has no client-focus signal. On macOS, read foreground app +
+// input idle time without Accessibility permission or inspecting window/thread text.
+const MAC_PRESENCE = 'ObjC.import("AppKit"); ObjC.import("CoreGraphics"); JSON.stringify({t3: /^com\\.t3tools\\.t3code(?:\\.|$)/i.test(String($.NSWorkspace.sharedWorkspace.frontmostApplication.bundleIdentifier.js || "")), idleSeconds: $.CGEventSourceSecondsSinceLastEventType(1, 0xffffffff)})';
+function readPresence(platform = process.platform, exec = cp.execFileSync) {
+  if (platform !== "darwin") return null;
   try {
-    const r = await fetch(C.url, { method: "POST", headers: { "content-type": "application/json", "user-agent": "t3listen", ...C.headers }, body: JSON.stringify(e), signal: AbortSignal.timeout(20000) });
+    return JSON.parse(exec("/usr/bin/osascript", ["-l", "JavaScript", "-e", MAC_PRESENCE],
+      { encoding: "utf8", timeout: 2000, maxBuffer: 4096, stdio: ["ignore", "pipe", "ignore"] }));
+  } catch { return null; } // unknown presence must not lose an away notification
+}
+const PRESENT_EVENTS = new Set(["request.opened", "request.resolved", "thread.finished", "thread.failed", "thread.cancelled"]);
+const presentInT3 = (p) => !!(p && p.t3 === true && Number.isFinite(p.idleSeconds) && p.idleSeconds >= 0 && p.idleSeconds < 60);
+async function post(e, { presence = readPresence, send = fetch, config = C, state = S } = {}) { // one attempt
+  // Check at the last boundary before EVERY attempt (live, catch-up and retries).
+  // Never send a resolution for a question the phone was not told about.
+  if ((e.event === "request.resolved" && state.sent[e.requestId]?.suppressed)
+      || (PRESENT_EVENTS.has(e.event) && presentInT3(presence()))) return { ok: true, suppressed: true };
+
+  try {
+    const r = await send(config.url, { method: "POST", headers: { "content-type": "application/json", "user-agent": "t3listen", ...config.headers }, body: JSON.stringify(e), signal: AbortSignal.timeout(20000) });
     if (r.ok) return { ok: true, status: r.status };
     let body = ""; try { body = await r.text(); } catch {}
     return { ok: false, status: r.status, body: redact(body), retry: RETRYABLE(r.status, body) };
   } catch (err) { return { ok: false, status: 0, body: (err.cause && err.cause.code) || err.name, retry: true }; }
 }
 const ref = (e) => String(e.requestId || e.runId || "");
-function markDelivered(e) {
-  if (e.runId && !e.requestId) { const f = S.finished[e.runId]; if (f && (f.e || f.parked)) { delete f.e; delete f.parked; saveState(); } return; }
-  const s = S.sent[e.requestId]; if (!s) return;
+function settleDelivery(state, e, suppressed = false) {
+  if (e.runId && !e.requestId) { const f = state.finished[e.runId]; if (f) { delete f.e; delete f.parked; if (suppressed) f.suppressed = true; } return; }
+  const s = state.sent[e.requestId]; if (!s) return;
+  if (suppressed && e.event === "request.opened") s.suppressed = true;
   if (s.parked) { delete s.parked[e.event]; if (!Object.keys(s.parked).length) delete s.parked; }
-  if (e.event === "request.opened") s.delivered = true; else if (e.event === "request.resolved" && s.closing) delete S.sent[e.requestId];
-  saveState();
+  if (e.event === "request.opened") s.delivered = true; else if (e.event === "request.resolved" && s.closing) delete state.sent[e.requestId];
+}
+function markDelivered(e, suppressed = false) {
+  settleDelivery(S, e, suppressed); saveState();
 }
 const MAX_RETRY_QUEUE = 100;
 const stateFor = (st, e) => (e.requestId ? st.sent[e.requestId] : e.runId ? st.finished[e.runId] : null);
@@ -174,6 +194,7 @@ async function deliver(e) {
   if (DRY) { log("DRY-RUN payload " + JSON.stringify(e)); delivered++; return true; }
   for (let i = 0; i < 3; i++) {
     const r = await post(e);
+    if (r.suppressed) { log(`suppressed ${e.event} ${ref(e).slice(-12)} (active in T3 or unseen question)`); markDelivered(e, true); return true; }
     if (r.ok) { log(`sent ${e.event} "${e.title}" ${ref(e).slice(-12)}${e.event === "request.resolved" ? ` answeredHere=${e.answeredHere}` : ""} -> HTTP ${r.status}`); delivered++; markDelivered(e); return true; }
     if (r.status) log(`webhook answered HTTP ${r.status} for ${e.event} ${ref(e).slice(-12)}${r.status === 401 || r.status === 403 ? " (check the key in listen.json)" : ""}${r.body ? `: ${r.body}` : ""}`);
     else log(`webhook not reachable (${r.body})`);
@@ -187,6 +208,7 @@ setInterval(async () => {
   for (const item of q) {
     const { e } = item; item.rounds++; e.sentAt = new Date().toISOString();
     const r = await post(e);
+    if (r.suppressed) { log(`suppressed ${e.event} ${ref(e).slice(-12)} (active in T3 or unseen question)`); markDelivered(e, true); continue; }
     if (r.ok) { log(`sent ${e.event} "${e.title}" ${ref(e).slice(-12)}${e.event === "request.resolved" ? ` answeredHere=${e.answeredHere}` : ""} -> HTTP ${r.status} (retry ${item.rounds})`); delivered++; markDelivered(e); continue; }
     log(`retry ${item.rounds}: ${r.status ? `webhook answered HTTP ${r.status}` : `webhook not reachable (${r.body})`} for ${e.event} ${ref(e).slice(-12)}${r.status && r.body ? `: ${r.body}` : ""}`);
     if (r.retry ? Date.now() - item.since < 864e5 : item.rounds < 10) retryLater(item);
@@ -596,5 +618,5 @@ t3listen setup [--machine name]   read the webhook URL (line 1) and 'Name: value
 t3listen test [--dry-run]         send one test event to the webhook
 t3listen preview-finish --thread id|title   print the run-end event for a thread's latest ended run (sends nothing)
 t3listen install [--approvals] | uninstall | status   start at login (macOS LaunchAgent, Windows logon task, Linux systemd --user)`;
-if (require.main !== module) module.exports = { keepForRetry, refillFromState, MAX_RETRY_QUEUE, pickThread, idLike, systemdUnit, localTime, approvalsLine, staleMinutes, RED, clean, cleanEvent, summary, requestInfo, endedAt, tickLastAlive, catchUpThreads, afterSnapshotListen, usageLimitFields, shellReadyToArm, canArmResume };
+if (require.main !== module) module.exports = { readPresence, presentInT3, post, settleDelivery, keepForRetry, refillFromState, MAX_RETRY_QUEUE, pickThread, idLike, systemdUnit, localTime, approvalsLine, staleMinutes, RED, clean, cleanEvent, summary, requestInfo, endedAt, tickLastAlive, catchUpThreads, afterSnapshotListen, usageLimitFields, shellReadyToArm, canArmResume };
 else ({ run, setup, test, "preview-finish": previewFinish, install: async () => install(), uninstall: async () => uninstall(), status: async () => status() }[cmd] || (async () => console.log(USAGE)))().catch((e) => { console.error("error:", e.message); process.exit(1); });

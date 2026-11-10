@@ -470,3 +470,79 @@ test("preview-finish: a failed archived-list read is named on NOT_FOUND, and a w
     assert.match(r.out, /^NOT_FOUND: no thread matches "missing-id-999"[\s\S]*T3's archived threads couldn't be checked:.*archive rpc down/);
   } finally { srv.close(); }
 });
+
+test("macOS presence: exact T3 bundle family, bounded command, unknown on failure", () => {
+  let calls = 0;
+  const exec = (file, args, options) => {
+    calls++;
+    assert.equal(file, "/usr/bin/osascript");
+    assert.equal(options.timeout, 2000);
+    assert.deepEqual(options.stdio, ["ignore", "pipe", "ignore"]);
+    const vm = require("node:vm");
+    for (const [bundle, expected] of [["com.t3tools.t3code", true], ["com.t3tools.t3code.nightly", true],
+      ["com.t3tools.T3Code.dev", true], ["com.t3tools.t3code-other", false], ["com.apple.Terminal", false]]) {
+      const result = JSON.parse(vm.runInNewContext(args[3], {
+        ObjC: { import() {} },
+        $: { NSWorkspace: { sharedWorkspace: { frontmostApplication: { bundleIdentifier: { js: bundle } } } },
+          CGEventSourceSecondsSinceLastEventType: () => 5 },
+      }));
+      assert.equal(result.t3, expected, bundle);
+      assert.equal(result.idleSeconds, 5);
+    }
+    return '{"t3":true,"idleSeconds":5}';
+  };
+  assert.deepEqual(l.readPresence("darwin", exec), { t3: true, idleSeconds: 5 });
+  assert.equal(l.readPresence("linux", exec), null);
+  assert.equal(l.readPresence("win32", exec), null);
+  assert.equal(calls, 1);
+  assert.equal(l.readPresence("darwin", () => { throw new Error("timeout"); }), null);
+  assert.equal(l.readPresence("darwin", () => "invalid"), null);
+});
+
+test("presence requires foreground T3 and recent input; idle foreground is away", () => {
+  for (const idleSeconds of [0, 10, 59.99]) assert.equal(l.presentInT3({ t3: true, idleSeconds }), true);
+  for (const p of [null, {}, { t3: false, idleSeconds: 0 }, ...[60, 600, -1, NaN, Infinity, "5", undefined].map(idleSeconds => ({ t3: true, idleSeconds }))]) {
+    assert.equal(l.presentInT3(p), false);
+  }
+});
+
+test("webhook boundary suppresses all notification kinds while active, sends away and test events", async () => {
+  let sends = 0;
+  const state = { sent: {}, finished: {} };
+  const send = async () => { sends++; return { ok: true, status: 200 }; };
+  const config = { url: "https://example.com/events", headers: {} };
+  for (const event of ["request.opened", "request.resolved", "thread.finished", "thread.failed", "thread.cancelled"]) {
+    assert.deepEqual(await l.post({ event }, { state, config, send, presence: () => ({ t3: true, idleSeconds: 1 }) }), { ok: true, suppressed: true });
+  }
+  assert.equal(sends, 0);
+  for (const presence of [() => null, () => ({ t3: false, idleSeconds: 1 }), () => ({ t3: true, idleSeconds: 60 })]) {
+    assert.equal((await l.post({ event: "thread.finished" }, { state, config, send, presence })).status, 200);
+  }
+  await l.post({ event: "test" }, { state, config, send, presence: () => { throw new Error("test must bypass presence"); } });
+  assert.equal(sends, 4);
+});
+
+test("failed delivery rechecks presence on retry; suppression survives restart and hides unseen resolution", async () => {
+  let active = false, sends = 0;
+  const state = { sent: { q: { delivered: false } }, finished: { r: { e: { event: "thread.finished" }, parked: {} } } };
+  const opts = { state, config: { url: "https://example.com", headers: {} },
+    presence: () => ({ t3: active, idleSeconds: 1 }),
+    send: async () => { sends++; return { ok: false, status: 503, text: async () => "unavailable" }; } };
+  const e = { event: "request.opened", requestId: "q" };
+  assert.equal((await l.post(e, opts)).retry, true);
+  active = true;
+  const retry = await l.post(e, opts);
+  assert.equal(retry.suppressed, true);
+  l.settleDelivery(state, e, retry.suppressed);
+  l.settleDelivery(state, { event: "thread.finished", runId: "r" }, true);
+  const restored = JSON.parse(JSON.stringify(state));
+  assert.equal(restored.sent.q.delivered, true);
+  assert.equal(restored.sent.q.suppressed, true);
+  assert.deepEqual(restored.finished.r, { suppressed: true }); // no catch-up or parked payload left
+  active = false;
+  assert.equal((await l.post({ event: "request.resolved", requestId: "q" }, { ...opts, state: restored })).suppressed, true);
+  assert.equal(sends, 1);
+  restored.sent.q.closing = true;
+  l.settleDelivery(restored, { event: "request.resolved", requestId: "q" }, true);
+  assert.deepEqual(restored.sent, {});
+});
