@@ -64,7 +64,7 @@ Then ask the agent to set up T3 Tots. It follows [AGENTS.md](AGENTS.md) (hash-ch
 
 `t3listen` POSTs live T3 events to a webhook you set up (`setup`, then `install` at login). Events: `request.opened` / `request.resolved`, and `thread.finished` / `failed` / `cancelled`. Approvals only if you turn them on. Usage-limit stops can arm T3's Resume at reset.
 
-On macOS, automatic webhook notifications are suppressed while T3 Code is foreground and system input was used within 60 seconds. Suppressed events are not replayed later. Idle foreground counts as away. Windows, Linux, browser-only use and failed presence checks keep normal delivery. See [phone answers](skills/t3-phone-answers/SKILL.md) for details.
+On macOS, automatic webhook notifications are suppressed while T3 Code is foreground and system input was used within 15 minutes. Suppressed events are not replayed later. Idle foreground longer than 15 minutes counts as away. Windows, Linux, browser-only use and failed presence checks keep normal delivery. See [phone answers](skills/t3-phone-answers/SKILL.md) for details.
 
 Setup, events, approvals, and autoresume: [t3-phone-answers](skills/t3-phone-answers/SKILL.md). Who may answer: [t3-tots-rules "Decisions"](skills/t3-tots-rules/SKILL.md).
 

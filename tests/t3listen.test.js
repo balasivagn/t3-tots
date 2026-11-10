@@ -500,8 +500,8 @@ test("macOS presence: exact T3 bundle family, bounded command, unknown on failur
 });
 
 test("presence requires foreground T3 and recent input; idle foreground is away", () => {
-  for (const idleSeconds of [0, 10, 59.99]) assert.equal(l.presentInT3({ t3: true, idleSeconds }), true);
-  for (const p of [null, {}, { t3: false, idleSeconds: 0 }, ...[60, 600, -1, NaN, Infinity, "5", undefined].map(idleSeconds => ({ t3: true, idleSeconds }))]) {
+  for (const idleSeconds of [0, 10, 59.99, 60, 600, l.PRESENT_IDLE_SECONDS - 0.01]) assert.equal(l.presentInT3({ t3: true, idleSeconds }), true);
+  for (const p of [null, {}, { t3: false, idleSeconds: 0 }, ...[l.PRESENT_IDLE_SECONDS, l.PRESENT_IDLE_SECONDS + 1, 3600, -1, NaN, Infinity, "5", undefined].map(idleSeconds => ({ t3: true, idleSeconds }))]) {
     assert.equal(l.presentInT3(p), false);
   }
 });
@@ -515,7 +515,7 @@ test("webhook boundary suppresses all notification kinds while active, sends awa
     assert.deepEqual(await l.post({ event }, { state, config, send, presence: () => ({ t3: true, idleSeconds: 1 }) }), { ok: true, suppressed: true });
   }
   assert.equal(sends, 0);
-  for (const presence of [() => null, () => ({ t3: false, idleSeconds: 1 }), () => ({ t3: true, idleSeconds: 60 })]) {
+  for (const presence of [() => null, () => ({ t3: false, idleSeconds: 1 }), () => ({ t3: true, idleSeconds: l.PRESENT_IDLE_SECONDS })]) {
     assert.equal((await l.post({ event: "thread.finished" }, { state, config, send, presence })).status, 200);
   }
   await l.post({ event: "test" }, { state, config, send, presence: () => { throw new Error("test must bypass presence"); } });

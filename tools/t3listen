@@ -141,7 +141,9 @@ function readPresence(platform = process.platform, exec = cp.execFileSync) {
   } catch { return null; } // unknown presence must not lose an away notification
 }
 const PRESENT_EVENTS = new Set(["request.opened", "request.resolved", "thread.finished", "thread.failed", "thread.cancelled"]);
-const presentInT3 = (p) => !!(p && p.t3 === true && Number.isFinite(p.idleSeconds) && p.idleSeconds >= 0 && p.idleSeconds < 60);
+// Reading T3 output often has no keyboard/mouse input for several minutes; 60s treated that as away.
+const PRESENT_IDLE_SECONDS = 900;
+const presentInT3 = (p) => !!(p && p.t3 === true && Number.isFinite(p.idleSeconds) && p.idleSeconds >= 0 && p.idleSeconds < PRESENT_IDLE_SECONDS);
 async function post(e, { presence = readPresence, send = fetch, config = C, state = S } = {}) { // one attempt
   // Check at the last boundary before EVERY attempt (live, catch-up and retries).
   // Never send a resolution for a question the phone was not told about.
@@ -618,5 +620,5 @@ t3listen setup [--machine name]   read the webhook URL (line 1) and 'Name: value
 t3listen test [--dry-run]         send one test event to the webhook
 t3listen preview-finish --thread id|title   print the run-end event for a thread's latest ended run (sends nothing)
 t3listen install [--approvals] | uninstall | status   start at login (macOS LaunchAgent, Windows logon task, Linux systemd --user)`;
-if (require.main !== module) module.exports = { readPresence, presentInT3, post, settleDelivery, keepForRetry, refillFromState, MAX_RETRY_QUEUE, pickThread, idLike, systemdUnit, localTime, approvalsLine, staleMinutes, RED, clean, cleanEvent, summary, requestInfo, endedAt, tickLastAlive, catchUpThreads, afterSnapshotListen, usageLimitFields, shellReadyToArm, canArmResume };
+if (require.main !== module) module.exports = { readPresence, presentInT3, PRESENT_IDLE_SECONDS, post, settleDelivery, keepForRetry, refillFromState, MAX_RETRY_QUEUE, pickThread, idLike, systemdUnit, localTime, approvalsLine, staleMinutes, RED, clean, cleanEvent, summary, requestInfo, endedAt, tickLastAlive, catchUpThreads, afterSnapshotListen, usageLimitFields, shellReadyToArm, canArmResume };
 else ({ run, setup, test, "preview-finish": previewFinish, install: async () => install(), uninstall: async () => uninstall(), status: async () => status() }[cmd] || (async () => console.log(USAGE)))().catch((e) => { console.error("error:", e.message); process.exit(1); });
